@@ -29,6 +29,7 @@ from scipy.spatial import cKDTree
 import numpy as np
 import os
 from Bio.PDB import PDBParser, MMCIFParser, Superimposer
+import copy
 
 parser=argparse.ArgumentParser(description='please put your MPNN generate directory , your RFD3 generate cif directory and your output_directory here')
 parser.add_argument('-ir','--inputresidue',help="input your MPNN generate directory")
@@ -69,18 +70,6 @@ def get_pdb_files_recursive(directory):
         return []
     return natsorted(txt_files)
 
-def read_dict_from_txt(file_path):
-    if not os.path.isfile(file_path):
-        raise FileNotFoundError(f"文件 {file_path} 不存在")
-    result = {}
-    with open(file_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line or '=' not in line:
-                continue
-            key, value = line.split('=', 1)
-            result[key.strip()] = value.strip()
-    return result
 
 def read_dict_from_txt(file_path):
     if not os.path.isfile(file_path):
@@ -100,7 +89,7 @@ def monomer_single_predict(key,na_length,seq,output_dir,AF2_model_path):
     clear_mem()
     seq_new=seq[na_length:]
     print(seq_new)
-    binder_prediction_model = mk_afdesign_model(protocol="hallucination", use_templates=False, initial_guess=False,use_initial_atom_pos=False, num_recycles=1,data_dir=AF2_model_path, use_multimer=False)
+    binder_prediction_model = mk_afdesign_model(protocol="hallucination", use_templates=False, initial_guess=False,use_initial_atom_pos=False, num_recycles=3,data_dir=AF2_model_path, use_multimer=False)
     binder_prediction_model.prep_inputs(length=len(seq_new))
     binder_prediction_model.set_seq(seq_new)
     binder_prediction_model.predict()
@@ -245,593 +234,137 @@ def get_cif_files_recursive(directory):
     return cif_files
 
 
-from scipy.spatial import cKDTree
-import numpy as np
-import os
-from Bio.PDB import PDBParser, MMCIFParser, Superimposer
-import tree
+
 
 
 class StructureValidator:
 
     def __init__(self, reference_file, prediction_file):
-
-        self.reference_file = reference_file
-        self.prediction_file = prediction_file
-
-        self.reference = self._load_structure(reference_file)#RFD3 generate
-        self.prediction = self._load_structure(prediction_file)#AF2 generate
-
-    # ==========================
-    # IO
-    # ==========================
+        self.reference = self._load_structure(reference_file)
+        self.prediction = self._load_structure(prediction_file)
 
     def _load_structure(self, filepath):
-
         ext = os.path.splitext(filepath)[1].lower()
-
-        if ext == ".pdb":
-            parser = PDBParser(QUIET=True)
-        elif ext in [".cif", ".mmcif"]:
-            parser = MMCIFParser(QUIET=True)
-        else:
-            raise ValueError(f"Unsupported format: {ext}")
-
+        parser = PDBParser(QUIET=True) if ext == ".pdb" else MMCIFParser(QUIET=True)
         return parser.get_structure("model", filepath)
 
-    # ==========================
-    # Chain utilities
-    # ==========================
-
     def get_chain(self, structure, chain_id):
-
-        model = next(structure.get_models())
-        return model[chain_id]
+        return next(structure.get_models())[chain_id]
 
     def get_ca_atoms(self, chain):
-
-        return [
-            residue["CA"]
-            for residue in chain
-            if "CA" in residue
-        ]
-
-
+        return [r["CA"] for r in chain if "CA" in r]
 
     def get_heavy_atoms(self, chain):
-
         atoms = []
-
         for residue in chain:
-
             for atom in residue:
-
-                if atom.element == "H":
+                if atom.element.upper() == "H":
                     continue
-
-            atoms.append(atom)
-
+                atoms.append(atom)
         return atoms
-    # ==========================
-    # RMSD
-    # ==========================
 
-    def calculate_rmsd(
-        self,
-        reference_chain="C",
-        prediction_chain="A"
-    ):
-
-        ref_chain = self.get_chain(self.reference, reference_chain)
-        pred_chain = self.get_chain(self.prediction, prediction_chain)
-
-        ref_ca = self.get_ca_atoms(ref_chain)
-        pred_ca = self.get_ca_atoms(pred_chain)
-
-        n = min(len(ref_ca), len(pred_ca))
-
+    def calculate_rmsd(self, reference_chain="C", prediction_chain="A"):
+        ref = self.get_ca_atoms(self.get_chain(self.reference, reference_chain))
+        pred = self.get_ca_atoms(self.get_chain(self.prediction, prediction_chain))
+        n = min(len(ref), len(pred))
         sup = Superimposer()
-        sup.set_atoms(ref_ca[:n], pred_ca[:n])
-
+        sup.set_atoms(ref[:n], pred[:n])
         return sup.rms
 
-    # ==========================
-    # Alignment
-    # ==========================
-
-    def align_prediction(
-        self,
-        reference_chain="C",
-        prediction_chain="A"
-    ):
-
-        import copy
-
-        pred_aligned = copy.deepcopy(self.prediction)
-
-        ref_chain = self.get_chain(self.reference, reference_chain)
-        pred_chain = self.get_chain(pred_aligned, prediction_chain)
-
-        ref_ca = self.get_ca_atoms(ref_chain)
-        pred_ca = self.get_ca_atoms(pred_chain)
-
-        n = min(len(ref_ca), len(pred_ca))
-
+    def align_prediction(self, reference_chain="C", prediction_chain="A"):
+        aligned = copy.deepcopy(self.prediction)
+        ref = self.get_ca_atoms(self.get_chain(self.reference, reference_chain))
+        pred = self.get_ca_atoms(self.get_chain(aligned, prediction_chain))
+        n = min(len(ref), len(pred))
         sup = Superimposer()
-        sup.set_atoms(ref_ca[:n], pred_ca[:n])
-        sup.apply(pred_aligned.get_atoms())
+        sup.set_atoms(ref[:n], pred[:n])
+        sup.apply(aligned.get_atoms())
+        rot, tran = sup.rotran
+        return aligned, sup.rms, rot, tran
 
-        return pred_aligned, sup.rms
-
-    # ==========================
-    # 🔥 UPDATED CLASH FUNCTION（重点）
-    # ==========================
-    
-
-        # ==========================
-# Hbond / Salt bridge helper
-# ==========================
-
-    def _is_hbond_pair(self, e1, e2):
-        """
-    Possible hydrogen bond donor/acceptor pair.
-    Heavy atoms only.
-        """
-
-        HBOND = {
-        ("N", "O"),
-        ("O", "N"),
-        ("N", "N"),
-        ("O", "O"),
-    }
-
-        return (e1, e2) in HBOND
-
+    def _is_hbond_pair(self, atom1, atom2):
+        return atom1.element.upper() in ("N","O") and atom2.element.upper() in ("N","O")
 
     def _is_salt_bridge(self, atom1, atom2):
-        """
-    Very simple salt bridge detection.
+        pos = {"NZ","NH1","NH2","NE"}
+        neg = {"OP1","OP2","O1P","O2P"}
+        return atom1.get_name() in pos and atom2.get_name() in neg
 
-    Protein:
-        Lys NZ
-        Arg NH1 NH2 NE
-
-    DNA:
-        phosphate O atoms
-        """
-
-        protein_positive = {
-        "NZ",
-        "NH1",
-        "NH2",
-        "NE",
-    }
-
-        dna_negative = {
-        "OP1",
-        "OP2",
-        "O1P",
-        "O2P",
-    }
-
-        return (
-            atom1.get_name() in protein_positive
-            and
-            atom2.get_name() in dna_negative
+    def calculate_interface_clashes(self, aligned_prediction,
+                                    target_chains=("A","B"),
+                                    prediction_chain="A",
+                                    cutoff=2.2):
+        binder_atoms = self.get_heavy_atoms(
+            self.get_chain(aligned_prediction, prediction_chain)
         )
-        # ==========================    # Interface clash
-    # Binder vs DNA
-    # BindCraft style
-    # ==========================
-    '''
-    def calculate_interface_clashes(
-        self,
-        aligned_prediction,
-        target_chains=("A", "B"),
-        prediction_chain="A",
-        cutoff=2.4
-        ):
+        dna_atoms = []
+        for cid in target_chains:
+            dna_atoms.extend(self.get_heavy_atoms(self.get_chain(self.reference,cid)))
 
-        # -----------------------
-        # Binder atoms
-        # -----------------------
+        binder_coords = np.asarray([a.coord for a in binder_atoms])
+        dna_coords = np.asarray([a.coord for a in dna_atoms])
 
-        pred_chain = self.get_chain(
-            aligned_prediction,
-            prediction_chain
-        )
+        tree = cKDTree(dna_coords)
+        neighbors = tree.query_ball_point(binder_coords, r=cutoff)
 
-        pred_coords = []
-        
-        for residue in pred_chain:
-
-            for atom in residue:
-
-                if atom.element == "H":
-                    continue
-
-                pred_coords.append(atom.coord)
-
-
-        pred_coords = np.asarray(pred_coords)
-
-
-        # -----------------------
-        # Target DNA atoms
-        # -----------------------
-
-        target_coords = []
-
-        for chain_id in target_chains:
-
-            chain = self.get_chain(
-                self.reference,
-                chain_id
-            )
-
-            for residue in chain:
-
-                for atom in residue:
-
-                    if atom.element == "H":
-                        continue
-
-                    target_coords.append(atom.coord)
-
-
-        target_coords = np.asarray(target_coords)
-
-
-        # -----------------------
-        # KDTree
-        # -----------------------
-
-        tree = cKDTree(target_coords)
-
-
-        neighbors = tree.query_ball_point(
-            pred_coords,
-            r=cutoff
-        )
-
-
-        clash_pairs = 0
-
-
-        for hits in neighbors:
-
-            clash_pairs += len(hits)
-
+        interface_clashes = sum(len(h) for h in neighbors)
+        clashscore = 1000.0 * interface_clashes / max(len(binder_atoms),1)
 
         return {
-
-            "interface_clashes": clash_pairs
-
+            "interface_clashes": interface_clashes,
+            "interface_clashscore": clashscore,
+            "binder_atoms": len(binder_atoms),
         }
-    
-        '''
-    def calculate_interface_clashes(
-    self,
-    aligned_prediction,
-    target_chains=("A", "B"),
-    prediction_chain="A",
-    search_radius=4.0,
-):
 
-    # -----------------------------
-    # Bondi vdW radii
-    # -----------------------------
-        VDW = {
-        "H": 1.20,
-        "C": 1.70,
-        "N": 1.55,
-        "O": 1.52,
-        "S": 1.80,
-        "P": 1.80,
-    }
-
-    # -----------------------------
-    # binder atoms
-    # -----------------------------
-        pred_chain = self.get_chain(
-            aligned_prediction,
-            prediction_chain
-    )
-
-        binder_atoms = self.get_heavy_atoms(pred_chain)
-
-        binder_coords = np.array(
-            [a.coord for a in binder_atoms]
-    )
-
-    # -----------------------------
-    # DNA atoms
-    # -----------------------------
-        target_atoms = []
-
-        for chain_id in target_chains:
-
-            chain = self.get_chain(
-                self.reference,
-                chain_id
+    def calculate_internal_clashes(self,
+                                   aligned_prediction,
+                                   prediction_chain="A",
+                                   cutoff=2.4):
+        atoms = self.get_heavy_atoms(
+            self.get_chain(aligned_prediction,prediction_chain)
         )
+        coords = np.asarray([a.coord for a in atoms])
+        pairs = cKDTree(coords).query_pairs(cutoff)
 
-            target_atoms.extend(
-                self.get_heavy_atoms(chain)
-        )
-
-        target_coords = np.array(
-            [a.coord for a in target_atoms]
-    )
-
-    # -----------------------------
-    # KDTree
-    # -----------------------------
-        tree = cKDTree(target_coords)
-
-        neighbors = tree.query_ball_point(
-            binder_coords,
-            r=search_radius
-    )
-
-    # -----------------------------
-    # statistics
-    # -----------------------------
-        severe_pairs = 0
-        overlap_sum = 0.0
-        max_overlap = 0.0
-
-    # -----------------------------
-    # loop
-    # -----------------------------
-        for i, hits in enumerate(neighbors):
-
-            atom_i = binder_atoms[i]
-
-            ri = VDW.get(
-                atom_i.element.upper(),
-                1.7
-        )
-
-            for j in hits:
-
-                atom_j = target_atoms[j]
-
-                rj = VDW.get(
-                    atom_j.element.upper(),
-                    1.7
-            )
-
-                d = np.linalg.norm(
-                    atom_i.coord -
-                    atom_j.coord
-            )
-
-                overlap = (ri + rj) - d
-
-            # -----------------------------------
-            # default MolProbity tolerance
-            # -----------------------------------
-                tolerance = 0.4
-
-            # -----------------------------------
-            # possible hydrogen bond
-            # -----------------------------------
-                if (
-                    atom_i.element.upper() in ("N", "O")
-                    and
-                    atom_j.element.upper() in ("N", "O")
-            ):
-                    tolerance = 0.8
-
-            # -----------------------------------
-            # possible salt bridge
-            # -----------------------------------
-                if (
-                    atom_i.get_name() in ("NZ", "NH1", "NH2", "NE")
-                    and
-                    atom_j.get_name() in ("OP1", "OP2", "O1P", "O2P")
-            ):
-                    tolerance = 1.0
-
-                if overlap > tolerance:
-
-                    severe_pairs += 1
-
-                    overlap_sum += overlap
-
-                    max_overlap = max(
-                        max_overlap,
-                        overlap
-                )
-
-        binder_atom_num = len(binder_atoms)
-
-        interface_clashscore = (
-            severe_pairs /
-            binder_atom_num *
-            1000
-    )
-
-        return {
-
-        "interface_clash_pairs": severe_pairs,
-
-        "interface_clashscore": interface_clashscore,
-
-        "overlap_sum": overlap_sum,
-
-        "max_overlap": max_overlap,
-
-        "binder_atoms": binder_atom_num,
-
-    }
-    # ==========================
-    # Internal binder clashes
-    # ==========================
-
-    def calculate_internal_clashes(
-        self,
-        aligned_prediction,
-        prediction_chain="A",
-        cutoff=2.4
-        ):
-
-
-        chain = self.get_chain(
-            aligned_prediction,
-            prediction_chain
-        )
-
-
-        coords = []
-        residue_ids = []
-
-
-        for residue in chain:
-
-            res_id = residue.id[1]
-
-
-            for atom in residue:
-
-                if atom.element == "H":
-                    continue
-
-
-                coords.append(atom.coord)
-
-                residue_ids.append(res_id)
-
-
-
-        coords = np.asarray(coords)
-
-
-
-        tree = cKDTree(coords)
-
-
-        pairs = tree.query_pairs(
-            r=cutoff
-        )
-
-
-        clash_pairs = 0
-
-
+        clashes = 0
         for i,j in pairs:
-
-
-            res_i = residue_ids[i]
-            res_j = residue_ids[j]
-
-
-            # same residue
-            if res_i == res_j:
+            ri = atoms[i].get_parent()
+            rj = atoms[j].get_parent()
+            if ri==rj:
                 continue
-
-
-            # peptide bond neighbors
-            if abs(res_i-res_j)==1:
+            if abs(ri.id[1]-rj.id[1])==1 and ri.get_parent().id==rj.get_parent().id:
                 continue
+            clashes += 1
 
+        return {"internal_clashes": clashes}
 
-            clash_pairs += 1
-
-
-
-        return {
-
-            "internal_clashes": clash_pairs
-
-        }
-    
-    # ==========================
-    # FULL VALIDATION
-    # ==========================
-
-    def validate(
-        self,
-        reference_chain="C",
-        prediction_chain="A",
-        dna_chains=("A", "B"),
-        rmsd_cutoff=2.5,
-        clashscore_cutoff=10.0,
-        internal_clash_cutoff=0
-):
-
-    # -----------------------
-    # Alignment
-    # -----------------------
-        aligned_pred, rmsd = self.align_prediction(
-        reference_chain,
-        prediction_chain
-    )
-
-    # -----------------------
-    # Interface clashes
-    # -----------------------
-        interface = self.calculate_interface_clashes(
-        aligned_pred,
-        target_chains=dna_chains,
-        prediction_chain=prediction_chain
-    )
-
-    # -----------------------
-    # Binder internal clashes
-    # -----------------------
-        internal = self.calculate_internal_clashes(
-        aligned_pred,
-        prediction_chain=prediction_chain
-    )
-
-    # -----------------------
-    # Results
-    # -----------------------
+    def validate(self,
+                 reference_chain="C",
+                 prediction_chain="A",
+                 dna_chains=("A","B"),
+                 rmsd_cutoff=2,
+                 clash_cutoff=2.2):
+        aligned,rmsd,rot,tran = self.align_prediction(reference_chain,prediction_chain)
+        inter = self.calculate_interface_clashes(
+            aligned,dna_chains,prediction_chain,clash_cutoff
+        )
+        intra = self.calculate_internal_clashes(
+            aligned,prediction_chain,clash_cutoff
+        )
         result = {
-
-        "rmsd": rmsd,
-
-        # -------- Interface --------
-        "interface_clash_pairs":
-            interface["interface_clash_pairs"],
-
-        "interface_clashscore":
-            interface["interface_clashscore"],
-
-        "interface_overlap_sum":
-            interface["overlap_sum"],
-
-        "interface_max_overlap":
-            interface["max_overlap"],
-
-        # -------- Internal --------
-        "internal_clashes":
-            internal["internal_clashes"],
-
-        # -------- Pass / Fail --------
-        "pass_rmsd":
-            rmsd < rmsd_cutoff,
-
-        "pass_interface":
-            interface["interface_clashscore"] < clashscore_cutoff,
-
-        "pass_internal":
-            internal["internal_clashes"] <= internal_clash_cutoff,
-    }
-
+            "rmsd": rmsd,
+            **inter,
+            **intra,
+            "pass_rmsd": rmsd < rmsd_cutoff,
+            "pass_interface_clash": inter["interface_clashscore"]<10,
+            "pass_internal_clash": intra["internal_clashes"]==0,
+        }
         result["pass"] = (
-            result["pass_rmsd"]
-            and
-            result["pass_interface"]
-            and
-            result["pass_internal"]
-    )
-
+            result["pass_rmsd"] and
+            result["pass_interface_clash"] and
+            result["pass_internal_clash"]
+        )
         return result
-
-
 
 
 
@@ -868,10 +401,9 @@ for input_pdb in residue_files:
             reference_file=cif_path,
             prediction_file=afterrelax_pdb
     )
-        print(validator.reference_file)
-        print(validator.prediction_file)
 
-
+        print(validator.prediction)
+        print(validator.reference)
         result = validator.validate(
             reference_chain="C",
             prediction_chain="A",
